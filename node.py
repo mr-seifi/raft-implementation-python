@@ -158,10 +158,10 @@ class Node:
                 node.vote_request_condition.notify()
 
     def send_vote_response(self, message: VoteResponse) -> None:
-        follower = Node.NODES[message.node_id - 1]
-        with self.current_leader.vote_response_condition:
-            follower.vote_response_condition_data.append((message, ))
-            self.current_leader.vote_response_condition.notify()
+        leader = Node.NODES[message.node_id - 1]
+        with leader.vote_response_condition:
+            leader.vote_response_condition_data.append((message, ))
+            leader.vote_response_condition.notify()
 
     def recall_election_timeout(self):
         self.suspect_leader_failure(recall=True)
@@ -352,7 +352,7 @@ class Node:
                                         message: AppendEntriesResponse = None):
         while True:
             with self.append_entries_response_condition:
-                self.append_entries_response_condition
+                self.append_entries_response_condition.wait()
                 (message, ) = self.append_entries_response_condition_data.pop()
                 if self.current_term == message.current_term and self.current_role == Role.LEADER:
                     if message.success and message.ack >= self.acked_length[message.follower_id - 1]:
