@@ -123,7 +123,6 @@ class Node:
         while self.election_timer_enabled:
             current_time = time.monotonic()
             if current_time >= self.election_timeout:
-                print("timed out")
                 self.election_timeout = self._reset_election_timeout()
                 break
             time.sleep(0.01)
@@ -135,10 +134,11 @@ class Node:
         return
 
     def suspect_leader_failure(self, recall=False) -> None:
-        while time.monotonic() - self.time > self.TIMEOUT:
+        while time.monotonic() - self.time > self.TIMEOUT + random.uniform(0.5, 2):
             self.current_term += 1
             self.current_role = Role.CANDIDATE
             self.voted_for = self.node_id
+            print(f'IM NODE {self.node_id} AND IM A CANDIDATE')
             self.votes_received.add(self.node_id)
             self.last_term = self.log[-1].term if len(self.log) > 0 else 0
             message = VoteRequest(
@@ -211,6 +211,7 @@ class Node:
                     self.votes_received.add(vote_response.node_id)
                     if len(self.votes_received) >= (len(Node.NODES) + 1) // 2:
                         self.current_role = Role.LEADER
+                        print(f'IM NODE {self.node_id} AND IM A LEADER')
                         self.current_leader = self.node_id
                         self.election_timer_enabled = False
                         for node in Node.NODES:
