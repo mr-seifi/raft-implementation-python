@@ -64,6 +64,8 @@ class AppendEntriesResponse(Message):
 class Node:
     NODES = []
     UPPER_BOUND = 3
+    TIME_PERIOD = 1
+    TIMEOUT = 3
 
     def __init__(self) -> None:
         # START -- STORE IN A STABLE SITUATION
@@ -79,6 +81,7 @@ class Node:
         self.votes_received: set = set()
         self.sent_length: list = [0] * Node.UPPER_BOUND
         self.acked_length: list = [0] * Node.UPPER_BOUND
+        self.time = 0
 
         # Thread Conditions
         self.election_timer_enabled: bool = True
@@ -132,19 +135,21 @@ class Node:
         return
 
     def suspect_leader_failure(self, recall=False) -> None:
-        self.current_term += 1
-        self.current_role = Role.CANDIDATE
-        self.voted_for = self.node_id
-        self.votes_received.add(self.node_id)
-        self.last_term = self.log[-1].term if len(self.log) > 0 else 0
-        message = VoteRequest(
-            node_id=self.node_id,
-            current_term=self.current_term,
-            log_length=len(self.log),
-            last_term=self.last_term,
-        )
-        self.broadcast_vote_request(message=message)
-        self.start_election_timer(recall=recall)
+        while time.monotonic() - self.time > self.TIMEOUT:
+            self.current_term += 1
+            self.current_role = Role.CANDIDATE
+            self.voted_for = self.node_id
+            self.votes_received.add(self.node_id)
+            self.last_term = self.log[-1].term if len(self.log) > 0 else 0
+            message = VoteRequest(
+                node_id=self.node_id,
+                current_term=self.current_term,
+                log_length=len(self.log),
+                last_term=self.last_term,
+            )
+            self.broadcast_vote_request(message=message)
+            self.start_election_timer(recall=recall)
+            time.sleep(self.TIME_PERIOD)
 
     def broadcast_vote_request(self, message: VoteRequest) -> None:
         for node in Node.NODES:
@@ -161,40 +166,37 @@ class Node:
     def recall_election_timeout(self):
         self.suspect_leader_failure(recall=True)
 
-    def receive_vote_request(self, message: VoteRequest = None):
+    def receive_vote_request(self, 
+                             message: VoteRequest = None):
         while True:
             with self.vote_request_condition:
                 self.vote_request_condition.wait()
                 (message, ) = self.vote_request_condition_data.pop()
-                my_log_term = self.log[-1].term
-                log_ok = (message.last_term > my_log_term) or (
-                    message.last_term == my_log_term
-                    and message.log_length >= len(self.log)
-                )
-                term_ok = (message.current_term > self.current_term) or (
-                    message.current_term == self.current_term
-                    and self.voted_for in [message.node_id, None]
-                )
-
-                if log_ok and term_ok:
+                self.time = time.monotonic()
+                if message.current_term > self.current_term:
                     self.current_term = message.current_term
                     self.current_role = Role.FOLLOWER
+                    self.voted_for = None
+                self.last_term = self.log[-1].term if len(self.log) > 0 else 0
+                log_ok = (message.last_term > self.last_term) or (
+                    message.last_term == self.last_term and message.log_length >= len(self.log)
+                )
+                if message.current_term == self.current_term and log_ok and self.voted_for in [message.node_id, None]:
                     self.voted_for = message.node_id
-                    vote_response = VoteResponse(
+                    message = VoteResponse(
                         node_id=self.node_id,
                         current_term=self.current_term,
-                        granted=True,
+                        granted=True
                     )
-
                 else:
-                    vote_response = VoteResponse(
+                    message = VoteResponse(
                         node_id=self.node_id,
                         current_term=self.current_term,
-                        granted=False,
+                        granted=False
                     )
 
-                self.send(message=vote_response)
-            time.sleep(1)
+                self.send_vote_response(message=message)
+            time.sleep(self.TIME_PERIOD)
 
     def receive_vote_response(self, vote_response: VoteResponse = None):
         while True:
@@ -225,7 +227,7 @@ class Node:
                     self.current_role = Role.FOLLOWER
                     self.voted_for = None
                     self.election_timer_enabled = False
-            time.sleep(1)
+            time.sleep(self.TIME_PERIOD)
 
     def broadcast_append_entries_request(self, message: AppendEntriesRequest):
         if self.current_role == Role.LEADER:
@@ -242,7 +244,7 @@ class Node:
                     if node.node_id == self.node_id:
                         continue
                     self.replicate_log(leader_id=self.node_id, follower_id=node.node_id)
-            time.sleep(1)
+            time.sleep(self.TIME_PERIOD)
 
     def replicate_log(self, leader_id, follower_id):
         prefix_length = self.sent_length[follower_id - 1]
@@ -282,6 +284,7 @@ class Node:
             with self.append_entries_request_condition:
                 self.append_entries_request_condition.wait()
                 (message, ) = self.append_entries_request_condition_data.pop()
+                self.time = time.monotonic()
                 if message.current_term > self.current_term:
                     self.current_term = message.current_term
                     self.voted_for = None
@@ -318,7 +321,7 @@ class Node:
                 self.send_append_entries_response(
                     message=append_entries_response
                 )
-            time.sleep(1)
+            time.sleep(self.TIME_PERIOD)
 
     def send_append_entries_response(
         self, 
@@ -363,7 +366,7 @@ class Node:
                     self.current_role = Role.FOLLOWER
                     self.voted_for = None
                     self.election_timer_enabled = False
-            time.sleep(1)
+            time.sleep(self.TIME_PERIOD)
 
     def commit_log_entries(self):
         while self.commit_length < len(self.log):
@@ -379,13 +382,13 @@ class Node:
                 break
 
     def start(self):
-        self.suspect_leader_failure()
         threads = [
             threading.Thread(target=self.receive_vote_request, daemon=True),
             threading.Thread(target=self.receive_vote_response, daemon=True),
             threading.Thread(target=self.receive_append_entries_request, daemon=True),
             threading.Thread(target=self.receive_append_entries_response, daemon=True),
-            threading.Thread(target=self.broadcast_append_entries_request_periodically, daemon=True)
+            threading.Thread(target=self.broadcast_append_entries_request_periodically, daemon=True),
+            threading.Thread(target=self.suspect_leader_failure, daemon=True),
         ]
 
         for thread in threads:
