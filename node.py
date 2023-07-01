@@ -39,6 +39,13 @@ class VoteResponse(Message):
         super().__init__()
 
 
+class AppendEntriesRequest(Message):
+    def __init__(self, node_id, log: Log) -> None:
+        self.node_id = node_id
+        self.log = log
+        super().__init__()
+
+
 class Node:
     NODES = []
     UPPER_BOUND = 3
@@ -88,14 +95,14 @@ class Node:
         while self.election_timer_enabled:
             current_time = time.monotonic()
             if current_time >= self.election_timeout:
-                print('timed out')
+                print("timed out")
                 self.election_timeout = self._reset_election_timeout()
                 break
             time.sleep(0.01)
 
         if self.election_timer_enabled:
             self.recall_election_timeout()
-        
+
         self.election_timer_enabled = True
         return
 
@@ -164,10 +171,145 @@ class Node:
                         continue
                     self.sent_length[node.node_id - 1] = len(self.log)
                     self.acked_length[node.node_id - 1] = 0
-                    # TODO: ReplicateLog(node_id, follower)
+                    self.replicate_log(
+                        leader_id=self.node_id, follower_id=vote_response.node_id
+                    )
+
         elif vote_response.current_term > self.current_term:
             self.current_term = vote_response.current_term
             self.current_role = Role.FOLLOWER
             self.voted_for = None
             self.election_timer_enabled = False
 
+    def broadcast_append_entries_request(self, message: AppendEntriesRequest):
+        if self.current_role == Role.LEADER:
+            self.log.append(message.log)
+            self.acked_length[message.node_id - 1] = len(self.log)
+            self.broadcast_append_entries_request_periodically()
+        else:
+            # TODO: Forward request to self.current_leader
+            ...
+
+    def broadcast_append_entries_request_periodically(self):
+        if self.current_role == Role.LEADER:
+            for node in Node.NODES:
+                if node.node_id == self.node_id:
+                    continue
+                # TODO: ReplicateLog(nodeId, follower)
+
+    def replicate_log(self, leader_id, follower_id):
+        prefix_length = self.sent_length[follower_id - 1]
+        suffix = self.log[prefix_length:]
+        prefix_term = 0
+        if prefix_length > 0:
+            prefix_term = self.log[-1].term
+        self.send_append_entries_request(
+            leader_id=leader_id,
+            current_term=self.current_term,
+            prefix_len=prefix_length,
+            prefix_term=prefix_term,
+            commit_len=self.commit_length,
+            suffix=suffix,
+            follower_id=follower_id,
+        )
+
+    def send_append_entries_request(
+        self,
+        leader_id,
+        current_term,
+        prefix_len,
+        prefix_term,
+        commit_len,
+        suffix,
+        follower_id,
+    ):
+        ...
+
+    def receive_append_entries_request(
+        self, leader_id, current_term, prefix_len, prefix_term, commit_len, suffix
+    ):
+        if current_term > self.current_term:
+            self.current_term = current_term
+            self.voted_for = None
+            self.election_timer_enabled = False
+        if current_term == self.current_term:
+            self.current_role = Role.FOLLOWER
+            self.current_leader = leader_id
+        log_ok = (len(self.log) >= prefix_len) and (
+            prefix_len == 0 or self.log[-1].term == current_term
+        )
+        if (current_term == self.current_term) and log_ok:
+            # TODO: AppendEntries(prefixLen, leaderCommit, suffix)
+            ack = prefix_len + len(suffix)
+            self.send_append_entries_response(
+                node_id=self.node_id,
+                leader_id=self.current_leader.node_id,
+                current_term=self.current_term,
+                ack=ack,
+                success=True
+            )
+        else:
+            self.send_append_entries_response(
+                node_id=self.node_id,
+                leader_id=self.current_leader.node_id,
+                current_term=self.current_term,
+                ack=0,
+                success=False
+            )
+
+    def send_append_entries_response(
+        self,
+        node_id,
+        leader_id,
+        current_term,
+        ack,
+        success
+    ):
+        ...
+    
+    def append_entries(self, prefix_len, leader_commit, suffix):
+        if len(suffix) > 0 and len(self.log) >= prefix_len:
+            index = min(len(self.log), prefix_len + len(suffix)) - 1
+            if self.log[index].term != suffix[index - prefix_len].term:
+                self.log = self.log[0:prefix_len]
+            if prefix_len + len(suffix) > len(self.log):
+                for i in range(len(self.log) - prefix_len, len(suffix)):
+                    self.log.append(suffix[i])
+            if leader_commit > self.commit_length:
+                for i in range(self.commit_length, leader_commit):
+                    self.deliver_command(suffix[i].command)
+                self.commit_length = leader_commit
+                    
+    def deliver_command(self, command):
+        ...
+    
+    def receive_append_entries_response(self, follower_id, current_term, ack, success):
+        if self.current_term == current_term and self.current_role == Role.LEADER:
+            if success and ack >= self.acked_length[follower_id - 1]:
+                self.sent_length[follower_id - 1] = ack
+                self.acked_length[follower_id - 1] = ack
+                # TODO: CommitEntries
+            elif self.sent_length[follower_id - 1] > 0:
+                self.sent_length[follower_id - 1] -= 1
+                self.replicate_log(
+                    leader_id=self.node_id,
+                    follower_id=follower_id
+                )
+        elif current_term > self.current_term:
+            self.current_term = current_term
+            self.current_role = Role.FOLLOWER
+            self.voted_for = None
+            self.election_timer_enabled = False
+    
+    def commit_log_entries(self):
+        while self.commit_length < len(self.log):
+            acks = 0
+            for node in Node.NODES:
+                if self.acked_length[node.node_id - 1] > self.commit_length:
+                    acks += 1
+            
+            if acks >= (len(Node.NODES) + 1) // 2:
+                self.deliver_command(command=self.log[self.commit_length].command)
+                self.commit_length += 1
+            else:
+                break
