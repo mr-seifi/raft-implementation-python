@@ -32,15 +32,16 @@ class VoteRequest(Message):
 
 
 class VoteResponse(Message):
-    def __init__(self, node_id, current_term, granted) -> None:
+    def __init__(self, node_id, current_term, granted, to) -> None:
         self.node_id = node_id
         self.current_term = current_term
         self.granted = granted
+        self.to = to
         super().__init__()
 
 
 class AppendEntriesRequest(Message):
-    def __init__(self, node_id, leader_id, current_term, prefix_len, prefix_term, commit_len, suffix: List[Log]) -> None:
+    def __init__(self, node_id, leader_id, current_term, prefix_len, prefix_term, commit_len, suffix: List[Log], follower_id) -> None:
         self.node_id = node_id
         self.suffix = suffix
         self.leader_id = leader_id
@@ -48,6 +49,7 @@ class AppendEntriesRequest(Message):
         self.prefix_len = prefix_len
         self.prefix_term = prefix_term
         self.commit_len = commit_len
+        self.follower_id = follower_id
         super().__init__()
 
 
@@ -64,8 +66,9 @@ class AppendEntriesResponse(Message):
 class Node:
     NODES = []
     UPPER_BOUND = 3
-    TIME_PERIOD = 1
-    TIMEOUT = 3
+    TIME_PERIOD = 3
+    TIMEOUT = 5
+    RANDOM_TIME = (5, 15)
 
     def __init__(self) -> None:
         # START -- STORE IN A STABLE SITUATION
@@ -81,7 +84,7 @@ class Node:
         self.votes_received: set = set()
         self.sent_length: list = [0] * Node.UPPER_BOUND
         self.acked_length: list = [0] * Node.UPPER_BOUND
-        self.time = 0
+        self.time = time.monotonic() + random.uniform(*Node.RANDOM_TIME)
 
         # Thread Conditions
         self.election_timer_enabled: bool = True
@@ -134,34 +137,38 @@ class Node:
         return
 
     def suspect_leader_failure(self, recall=False) -> None:
-        while time.monotonic() - self.time > self.TIMEOUT + random.uniform(0.5, 2):
-            self.current_term += 1
-            self.current_role = Role.CANDIDATE
-            self.voted_for = self.node_id
-            print(f'IM NODE {self.node_id} AND IM A CANDIDATE')
-            self.votes_received.add(self.node_id)
-            self.last_term = self.log[-1].term if len(self.log) > 0 else 0
-            message = VoteRequest(
-                node_id=self.node_id,
-                current_term=self.current_term,
-                log_length=len(self.log),
-                last_term=self.last_term,
-            )
-            self.broadcast_vote_request(message=message)
-            self.start_election_timer(recall=recall)
+        while True:
+            while time.monotonic() - self.time > self.TIMEOUT:
+                self.current_term += 1
+                self.current_role = Role.CANDIDATE
+                self.voted_for = self.node_id
+                print(f'{self.node_id} BECOME CANDIDATE')
+                self.votes_received.add(self.node_id)
+                self.last_term = self.log[-1].term if len(self.log) > 0 else 0
+                message = VoteRequest(
+                    node_id=self.node_id,
+                    current_term=self.current_term,
+                    log_length=len(self.log),
+                    last_term=self.last_term,
+                )
+                self.broadcast_vote_request(message=message)
+                self.start_election_timer(recall=recall)
+                time.sleep(self.TIME_PERIOD)
             time.sleep(self.TIME_PERIOD)
 
     def broadcast_vote_request(self, message: VoteRequest) -> None:
         for node in Node.NODES:
-            with node.vote_request_condition:
-                node.vote_request_condition_data.append((message, ))
-                node.vote_request_condition.notify()
+            if node.node_id != self.node_id:
+                with node.vote_request_condition:
+                    print(f'BROADCAST VQ FROM {self.node_id} TO {node.node_id}')
+                    node.vote_request_condition_data.append((message, ))
+                    node.vote_request_condition.notify()
 
     def send_vote_response(self, message: VoteResponse) -> None:
-        leader = Node.NODES[message.node_id - 1]
-        with leader.vote_response_condition:
-            leader.vote_response_condition_data.append((message, ))
-            leader.vote_response_condition.notify()
+        candidate = Node.NODES[message.to - 1]
+        with candidate.vote_response_condition:
+            candidate.vote_response_condition_data.append((message, ))
+            candidate.vote_response_condition.notify()
 
     def recall_election_timeout(self):
         self.suspect_leader_failure(recall=True)
@@ -172,7 +179,7 @@ class Node:
             with self.vote_request_condition:
                 self.vote_request_condition.wait()
                 (message, ) = self.vote_request_condition_data.pop()
-                self.time = time.monotonic()
+                self.time = time.monotonic() + random.uniform(*Node.RANDOM_TIME)
                 if message.current_term > self.current_term:
                     self.current_term = message.current_term
                     self.current_role = Role.FOLLOWER
@@ -183,16 +190,20 @@ class Node:
                 )
                 if message.current_term == self.current_term and log_ok and self.voted_for in [message.node_id, None]:
                     self.voted_for = message.node_id
+                    print(f'VQ FROM {message.node_id} TO {self.node_id}')
                     message = VoteResponse(
                         node_id=self.node_id,
+                        to=message.node_id,
                         current_term=self.current_term,
                         granted=True
                     )
                 else:
+                    print(f'VQ FROM {message.node_id} TO {self.node_id}')
                     message = VoteResponse(
                         node_id=self.node_id,
+                        to=message.node_id,
                         current_term=self.current_term,
-                        granted=False
+                        granted=False,
                     )
 
                 self.send_vote_response(message=message)
@@ -203,6 +214,7 @@ class Node:
             with self.vote_response_condition:
                 self.vote_response_condition.wait()
                 (vote_response, ) = self.vote_response_condition_data.pop()
+                print(f'VR FROM {vote_response.node_id} TO {self.node_id} WITH success={vote_response.granted}')
                 if (
                     self.current_role == Role.CANDIDATE
                     and self.current_term == vote_response.current_term
@@ -212,7 +224,7 @@ class Node:
                     if len(self.votes_received) >= (len(Node.NODES) + 1) // 2:
                         self.current_role = Role.LEADER
                         print(f'IM NODE {self.node_id} AND IM A LEADER')
-                        self.current_leader = self.node_id
+                        self.current_leader = self
                         self.election_timer_enabled = False
                         for node in Node.NODES:
                             if node.node_id == self.node_id:
@@ -261,7 +273,8 @@ class Node:
             prefix_len=prefix_length,
             prefix_term=prefix_term,
             commit_len=self.commit_length,
-            suffix=suffix
+            suffix=suffix,
+            follower_id=follower_id
         )
         self.send_append_entries_request(
             message=append_entries_request
@@ -274,7 +287,7 @@ class Node:
         
         follower = Node.NODES[message.follower_id - 1]
         with follower.append_entries_request_condition:
-            follower.appenappend_entries_request_condition_data.append((message, ))
+            follower.append_entries_request_condition_data.append((message, ))
             follower.append_entries_request_condition.notify()
 
     def receive_append_entries_request(
@@ -285,14 +298,14 @@ class Node:
             with self.append_entries_request_condition:
                 self.append_entries_request_condition.wait()
                 (message, ) = self.append_entries_request_condition_data.pop()
-                self.time = time.monotonic()
+                self.time = time.monotonic() + random.uniform(*Node.RANDOM_TIME)
                 if message.current_term > self.current_term:
                     self.current_term = message.current_term
                     self.voted_for = None
                     self.election_timer_enabled = False
                 if message.current_term == self.current_term:
                     self.current_role = Role.FOLLOWER
-                    self.current_leader = message.leader_id
+                    self.current_leader = Node.NODES[message.leader_id - 1]
                 log_ok = (len(self.log) >= message.prefix_len) and (
                     message.prefix_len == 0 or self.log[-1].term == message.prefix_term
                 )
@@ -308,7 +321,7 @@ class Node:
                         leader_id=self.current_leader.node_id,
                         current_term=self.current_term,
                         ack=ack,
-                        success=True
+                        success=True,
                     )
                 else:
                     append_entries_response = AppendEntriesResponse(
@@ -355,13 +368,13 @@ class Node:
                 self.append_entries_response_condition.wait()
                 (message, ) = self.append_entries_response_condition_data.pop()
                 if self.current_term == message.current_term and self.current_role == Role.LEADER:
-                    if message.success and message.ack >= self.acked_length[message.follower_id - 1]:
-                        self.sent_length[message.follower_id - 1] = message.ack
-                        self.acked_length[message.follower_id - 1] = message.ack
+                    if message.success and message.ack >= self.acked_length[message.node_id - 1]:
+                        self.sent_length[message.node_id - 1] = message.ack
+                        self.acked_length[message.node_id - 1] = message.ack
                         self.commit_log_entries()
-                    elif self.sent_length[message.follower_id - 1] > 0:
-                        self.sent_length[message.follower_id - 1] -= 1
-                        self.replicate_log(leader_id=self.node_id, follower_id=message.follower_id)
+                    elif self.sent_length[message.node_id - 1] > 0:
+                        self.sent_length[message.node_id - 1] -= 1
+                        self.replicate_log(leader_id=self.node_id, follower_id=message.node_id)
                 elif message.current_term > self.current_term:
                     self.current_term = message.current_term
                     self.current_role = Role.FOLLOWER
