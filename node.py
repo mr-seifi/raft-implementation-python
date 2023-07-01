@@ -3,6 +3,7 @@ import random
 import time
 import threading
 from typing import List
+import os
 
 
 class Role:
@@ -12,9 +13,9 @@ class Role:
 
 
 class Log:
-    def __init__(self) -> None:
-        self.term: int = 0
-        self.command: str = None
+    def __init__(self, term, command) -> None:
+        self.term: int = term
+        self.command: str = command
 
 
 class Message(ABC):
@@ -41,7 +42,7 @@ class VoteResponse(Message):
 
 
 class AppendEntriesRequest(Message):
-    def __init__(self, node_id, leader_id, current_term, prefix_len, prefix_term, commit_len, suffix: List[Log], follower_id) -> None:
+    def __init__(self, node_id, leader_id, current_term, prefix_len, prefix_term, commit_len, suffix: List[Log]) -> None:
         self.node_id = node_id
         self.suffix = suffix
         self.leader_id = leader_id
@@ -49,7 +50,6 @@ class AppendEntriesRequest(Message):
         self.prefix_len = prefix_len
         self.prefix_term = prefix_term
         self.commit_len = commit_len
-        self.follower_id = follower_id
         super().__init__()
 
 
@@ -66,9 +66,9 @@ class AppendEntriesResponse(Message):
 class Node:
     NODES = []
     UPPER_BOUND = 3
-    TIME_PERIOD = 3
-    TIMEOUT = 5
-    RANDOM_TIME = (5, 15)
+    TIME_PERIOD = 1
+    TIMEOUT = 10
+    RANDOM_TIME = (2, TIMEOUT - 5)
 
     def __init__(self) -> None:
         # START -- STORE IN A STABLE SITUATION
@@ -138,7 +138,9 @@ class Node:
 
     def suspect_leader_failure(self, recall=False) -> None:
         while True:
-            while time.monotonic() - self.time > self.TIMEOUT:
+            while time.monotonic() - self.time >= 0:
+                if self.current_role == Role.LEADER:
+                    continue
                 self.current_term += 1
                 self.current_role = Role.CANDIDATE
                 self.voted_for = self.node_id
@@ -244,9 +246,13 @@ class Node:
 
     def broadcast_append_entries_request(self, message: AppendEntriesRequest):
         if self.current_role == Role.LEADER:
-            self.log.append(message.log)
+            self.log.extend(message.suffix)
             self.acked_length[message.node_id - 1] = len(self.log)
-            self.broadcast_append_entries_request_periodically()
+            if self.current_role == Role.LEADER:
+                for node in Node.NODES:
+                    if node.node_id == self.node_id:
+                        continue
+                    self.replicate_log(leader_id=self.node_id, follower_id=node.node_id)
         else:
             self.current_leader.broadcast_append_entries_request(message=message)
 
@@ -266,15 +272,15 @@ class Node:
         if prefix_length > 0:
             prefix_term = self.log[-1].term
         
+        print(f'RL FROM {leader_id} TO {follower_id}')
         append_entries_request = AppendEntriesRequest(
-            node_id=self.node_id,
+            node_id=follower_id,
             leader_id=leader_id,
             current_term=self.current_term,
             prefix_len=prefix_length,
             prefix_term=prefix_term,
             commit_len=self.commit_length,
-            suffix=suffix,
-            follower_id=follower_id
+            suffix=suffix
         )
         self.send_append_entries_request(
             message=append_entries_request
@@ -285,7 +291,7 @@ class Node:
         message: AppendEntriesRequest
     ):
         
-        follower = Node.NODES[message.follower_id - 1]
+        follower = Node.NODES[message.node_id - 1]
         with follower.append_entries_request_condition:
             follower.append_entries_request_condition_data.append((message, ))
             follower.append_entries_request_condition.notify()
@@ -346,20 +352,23 @@ class Node:
             self.current_leader.append_entries_response_condition.notify()
 
     def append_entries(self, prefix_len, leader_commit, suffix):
-        if len(suffix) > 0 and len(self.log) >= prefix_len:
+        if len(suffix) > 0 and len(self.log) > prefix_len:
             index = min(len(self.log), prefix_len + len(suffix)) - 1
             if self.log[index].term != suffix[index - prefix_len].term:
                 self.log = self.log[0:prefix_len]
-            if prefix_len + len(suffix) > len(self.log):
-                for i in range(len(self.log) - prefix_len, len(suffix)):
-                    self.log.append(suffix[i])
-            if leader_commit > self.commit_length:
-                for i in range(self.commit_length, leader_commit):
-                    self.deliver_command(suffix[i].command)
-                self.commit_length = leader_commit
+        if prefix_len + len(suffix) > len(self.log):
+            print(f'NODE {self.node_id} SUFFIX {suffix}')
+            for i in range(len(self.log) - prefix_len, len(suffix)):
+                self.log.append(suffix[i])
+                print(f'NODE {self.node_id} LOG APPENDED')
+        print(f'NODE {self.node_id} LEADER COMMIT: {leader_commit}, COMMIT_LENGTH: {self.commit_length}')
+        if leader_commit > self.commit_length:
+            for i in range(self.commit_length, leader_commit):
+                self.deliver_command(self.log[i].command)
+            self.commit_length = leader_commit
 
     def deliver_command(self, command):
-        ...
+        os.system(command)
 
     def receive_append_entries_response(self, 
                                         message: AppendEntriesResponse = None):
