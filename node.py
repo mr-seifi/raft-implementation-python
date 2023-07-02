@@ -65,6 +65,7 @@ class AppendEntriesResponse(Message):
 
 class Node:
     NODES = []
+    STOP_LEADER = threading.Event()
     UPPER_BOUND = 3
     TIME_PERIOD = 1
     TIMEOUT = 10
@@ -258,11 +259,13 @@ class Node:
 
     def broadcast_append_entries_request_periodically(self):
         while True:
-            if self.current_role == Role.LEADER:
-                for node in Node.NODES:
-                    if node.node_id == self.node_id:
-                        continue
-                    self.replicate_log(leader_id=self.node_id, follower_id=node.node_id)
+            while not Node.STOP_LEADER.is_set():
+                if self.current_role == Role.LEADER:
+                    for node in Node.NODES:
+                        if node.node_id == self.node_id:
+                            continue
+                        self.replicate_log(leader_id=self.node_id, follower_id=node.node_id)
+                time.sleep(self.TIME_PERIOD)
             time.sleep(self.TIME_PERIOD)
 
     def replicate_log(self, leader_id, follower_id):

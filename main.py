@@ -22,8 +22,12 @@ def request(command, _from):
     )
 
 
-def stop(node_id):
-    ...
+def stop():
+    Node.STOP_LEADER.set()
+
+
+def start():
+    Node.STOP_LEADER.clear()
 
 
 def main():
